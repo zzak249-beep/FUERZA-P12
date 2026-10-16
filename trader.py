@@ -138,8 +138,70 @@ class Trader:
         return o["id"]
 
     def _tp(self, sym, side, qty, price):
+        """Take profit nativo (disparador TAKE_PROFIT_MARKET, igual que el SL). Respaldo: orden límite."""
         side_c = "sell" if side == "long" else "buy"
-        return self.ex.create_order(sym, "limit", side_c, qty, price, self._p(side, True))["id"]
+        errs = []
+        for typ, params in (("market", {"takeProfitPrice": price}),
+                            ("TAKE_PROFIT_MARKET", {"stopPrice": price})):
+            try:
+                return self.ex.create_order(sym, typ, side_c, qty, None, self._p(side, True, params))["id"]
+            except Exception as e:
+                errs.append(str(e)[:140])
+        try:
+            return self.ex.create_order(sym, "limit", side_c, qty, price, self._p(side, True))["id"]
+        except Exception as e:
+            errs.append(str(e)[:140])
+        raise Exception(" | ".join(errs))
+
+    def _is_open(self, sym, oid):
+        try:
+            return self.ex.fetch_order(oid, sym).get("status") == "open"
+        except Exception:
+            return True   # ante la duda, asumir que existe (evita duplicar)
+
+    def _plan(self, sym, st):
+        s = 1 if st["side"] == "long" else -1
+        e, r, qty = st["entry"], st["risk"], st["qty"]
+        m = self.ex.market(sym)
+        min_amt = (m.get("limits", {}).get("amount", {}).get("min") or 0)
+        q1 = self._amt(sym, qty * C.TP1_FRAC)
+        q2 = self._amt(sym, qty - q1)
+        if C.PARTIAL_MODE and q1 >= min_amt and q2 >= min_amt:
+            return {"partial": True, "q1": q1, "q2": q2, "tp1": self._px(sym, e + s * C.TP1_R * r),
+                    "tp2": None if C.TRAIL_ON else self._px(sym, e + s * C.TP2_R * r)}
+        return {"partial": False, "q": qty, "tp": self._px(sym, e + s * C.TP_SINGLE_R * r)}
+
+    def _place_tps(self, sym, st):
+        """Coloca los TP que falten según el plan. Devuelve (ok, texto, errores)."""
+        pl, side, errs = st["plan"], st["side"], []
+        if pl["partial"]:
+            st["trail"] = bool(C.TRAIL_ON)
+            if not st["tp1_hit"] and not st["tp1_id"]:
+                try:
+                    st["tp1_id"] = self._tp(sym, side, pl["q1"], pl["tp1"])
+                except Exception as e:
+                    errs.append(f"TP1: {e}")
+            if pl["tp2"] and not st["tp2_id"]:
+                try:
+                    st["tp2_id"] = self._tp(sym, side, pl["q2"], pl["tp2"])
+                    st["tp_final"] = pl["tp2"]
+                except Exception as e:
+                    errs.append(f"TP2: {e}")
+            need = ((not st["tp1_hit"] and not st["tp1_id"]) or (pl["tp2"] and not st["tp2_id"]))
+            txt = f"TP1 {pl['tp1']} ({pl['q1']})" + (f" · TP2 {pl['tp2']} ({pl['q2']})" if pl["tp2"]
+                                                      else f" · resto con trailing {C.TRAIL_ATR}×ATR")
+        else:
+            st["tp1_done"] = True
+            if not st["tp2_id"]:
+                try:
+                    st["tp2_id"] = self._tp(sym, side, pl["q"], pl["tp"])
+                    st["tp_final"] = pl["tp"]
+                except Exception as e:
+                    errs.append(f"TP: {e}")
+            need = not st["tp2_id"]
+            txt = f"TP {pl['tp']}"
+        st["tp_ok"] = not need
+        return st["tp_ok"], txt, errs
 
     def _cancel(self, sym, oid):
         if oid:
@@ -224,31 +286,12 @@ class Trader:
 
         st = {"side": side, "code": sig["code"], "entry": fill, "risk": risk, "qty": qty, "atr": sig["atr"],
               "sl": sl, "sl_id": sl_id, "opened": time.time(), "tp1_id": None, "tp2_id": None,
-              "tp1_done": False, "tp1_hit": False, "trail": False, "tp_final": None,
+              "tp1_done": False, "tp1_hit": False, "trail": False, "tp_final": None, "tp_ok": False, "plan": None,
               "x": sig["x"], "hour": sig["hour"], "wday": sig["wday"]}
-        try:
-            q1 = self._amt(sym, qty * C.TP1_FRAC)
-            q2 = self._amt(sym, qty - q1)
-            if C.PARTIAL_MODE and q1 >= min_amt and q2 >= min_amt:
-                tp1 = self._px(sym, fill + s * C.TP1_R * risk)
-                st["tp1_id"] = self._tp(sym, side, q1, tp1)
-                if C.TRAIL_ON:
-                    st["trail"] = True
-                    tp_txt = f"TP1 {tp1} ({q1}) · resto con trailing {C.TRAIL_ATR}×ATR"
-                else:
-                    tp2 = self._px(sym, fill + s * C.TP2_R * risk)
-                    st["tp2_id"] = self._tp(sym, side, q2, tp2)
-                    st["tp_final"] = tp2
-                    tp_txt = f"TP1 {tp1} ({q1}) · TP2 {tp2} ({q2})"
-            else:
-                tp = self._px(sym, fill + s * C.TP_SINGLE_R * risk)
-                st["tp2_id"] = self._tp(sym, side, qty, tp)
-                st["tp_final"] = tp
-                st["tp1_done"] = True
-                tp_txt = f"TP {tp}"
-        except Exception as e:
-            self.notify(f"⚠️ {sym}: error colocando TP ({e}). El SL sí está activo; revisa a mano.")
-            tp_txt = "TP: ERROR"
+        st["plan"] = self._plan(sym, st)
+        ok, tp_txt, errs = self._place_tps(sym, st)
+        if not ok:
+            tp_txt += "\n⚠️ TP NO colocado: " + " ; ".join(errs)[:400] + "\n(el bot reintenta cada minuto; el SL sí está activo)"
 
         self.state[sym] = st
         self._save()
@@ -310,7 +353,8 @@ class Trader:
             self._save()
             return
 
-        if st["tp1_id"] and not st["tp1_done"] and st["tp1_id"] not in open_ids and self._closed(sym, st["tp1_id"]):
+        reduced = bool(st.get("plan") and st["plan"].get("partial")) and qty_now <= st["qty"] * (1 - C.TP1_FRAC) * 1.05
+        if st["tp1_id"] and not st["tp1_done"] and (reduced or (st["tp1_id"] not in open_ids and self._closed(sym, st["tp1_id"]))):
             st["tp1_done"] = st["tp1_hit"] = True
             self._cancel(sym, st["sl_id"])
             try:
@@ -319,6 +363,22 @@ class Trader:
                 self.notify(f"✅ TP1 en {sym}. Stop movido a entrada ({st['entry']}).")
             except Exception as e:
                 self.notify(f"🚨 {sym}: TP1 hecho pero fallo al mover SL a BE ({e}). Revisa a mano.")
+            self._save()
+
+        # auto-reparación: coloca el TP que falte (también en posiciones abiertas con versiones anteriores)
+        if not st.get("tp_ok") and time.time() - st.get("tp_try", 0) > 60:
+            st["tp_try"] = time.time()
+            if not st.get("plan"):
+                st["plan"] = self._plan(sym, st)
+                for k in ("tp1_id", "tp2_id"):
+                    if st.get(k) and not self._is_open(sym, st[k]) and not (k == "tp1_id" and st["tp1_hit"]):
+                        st[k] = None
+            ok, txt, errs = self._place_tps(sym, st)
+            if ok:
+                self.notify(f"🔧 TP colocado en {sym}: {txt}")
+            elif not st.get("tp_err_sent"):
+                st["tp_err_sent"] = True
+                self.notify(f"⚠️ {sym}: sigo sin poder poner el TP: " + " ; ".join(errs)[:400])
             self._save()
 
         if time.time() - st["opened"] >= C.MAX_BARS * C.TF_SEC:
