@@ -1,14 +1,5 @@
-# secretos y estado: NUNCA al repositorio
 .env
-*.env
-!.env.example
 state.json
-trades.json
-live_trades.json
-*.tmp
-# python
 __pycache__/
 *.pyc
 .venv/
-venv/
-ops.csv
