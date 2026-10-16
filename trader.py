@@ -25,8 +25,10 @@ class Trader:
         })
         if C.DEMO:
             self.ex.set_sandbox_mode(True)
+        self.ex.rateLimit = max(self.ex.rateLimit or 0, C.RATE_LIMIT_MS)
         self.ex.load_markets()
         self.state = self._load()
+        self.day, self.day_pnl = None, 0.0
 
     # ---------- estado ----------
     def _load(self):
@@ -40,9 +42,34 @@ class Trader:
         except Exception as e:
             log.warning("No se pudo guardar estado: %s", e)
 
+    # ---------- utilidades ----------
+    def _retry(self, fn, *a, **k):
+        for n in range(4):
+            try:
+                return fn(*a, **k)
+            except Exception as e:
+                if n < 3 and ("100410" in str(e) or "RateLimit" in type(e).__name__ or "DDoS" in type(e).__name__):
+                    time.sleep(2 * (n + 1))
+                    continue
+                raise
+
+    def _roll(self):
+        d = time.strftime("%Y-%m-%d", time.gmtime())
+        if d != self.day:
+            self.day, self.day_pnl = d, 0.0
+
+    def can_open(self):
+        self._roll()
+        return self.day_pnl > -C.DAILY_LOSS_PCT
+
+    def check_account(self):
+        eq = self._equity()
+        self.notify(f"✅ Cuenta BingX conectada · equity {eq:.2f} USDT · modo posición: {C.POSITION_MODE}")
+        return eq
+
     # ---------- datos ----------
     def fetch_closed(self, symbol, tf, limit):
-        raw = self.ex.fetch_ohlcv(symbol, tf, limit=limit)
+        raw = self._retry(self.ex.fetch_ohlcv, symbol, tf, limit=limit)
         df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
         df.index = pd.to_datetime(df.ts, unit="ms", utc=True)
         tf_ms = self.ex.parse_timeframe(tf) * 1000
@@ -135,17 +162,18 @@ class Trader:
 
     # ---------- aprendizaje ----------
     def _record(self, st, exit_price, final_target=False):
-        """Calcula R neto de la operación y la envía al cerebro (meta + estacionalidad)."""
-        if not self.brain or not st.get("x"):
-            return None
+        """R neto de la operación -> freno diario + cerebro (meta + estacionalidad)."""
         s = 1 if st["side"] == "long" else -1
         risk = st["risk"]
         real = C.TP1_FRAC * C.TP1_R if st.get("tp1_hit") else 0.0
         rem = (1 - C.TP1_FRAC) if st.get("tp1_hit") else 1.0
         R = real + rem * s * (exit_price - st["entry"]) / risk
         Rn = R - C.COST_PCT / (risk / st["entry"] * 100)
-        self.brain.record({"x": st["x"], "y": int(Rn > 0), "r": Rn, "hour": st["hour"],
-                           "wday": st["wday"], "ts": time.time()})
+        self._roll()
+        self.day_pnl += Rn * C.RISK_PCT
+        if self.brain and st.get("x"):
+            self.brain.record({"x": st["x"], "y": int(Rn > 0), "r": Rn, "hour": st["hour"],
+                               "wday": st["wday"], "ts": time.time()})
         return Rn
 
     # ---------- abrir ----------

@@ -67,6 +67,14 @@ def main():
         f"Estac.: {'ON' if C.SEASON_ON else 'OFF'} · Trailing: {'ON' if C.TRAIL_ON else 'OFF'} · "
         f"Funding: {'ON' if C.FUNDING_ON else 'OFF'} · Muestras: {len(brain.samples)}")
 
+    halt_day = None
+    if not C.DRY_RUN:
+        try:
+            trader.check_account()
+        except Exception as e:
+            C.DRY_RUN = True
+            notify(f"🚨 No pude conectar con BingX ({e}). Revisa API key/secret y permisos. Paso a SOLO SEÑALES.")
+
     while True:
         try:
             now = time.time()
@@ -113,6 +121,11 @@ def main():
                                f"TP1 {sig['tp1']:.6g} · TP2 {sig['tp2']:.6g}\n"
                                f"Riesgo {sig['risk'] / sig['entry'] * 100:.2f}% del precio\n{info}")
                     else:
+                        if not trader.can_open():
+                            if halt_day != trader.day:
+                                halt_day = trader.day
+                                notify(f"⛔ Freno diario: pérdida ≥ {C.DAILY_LOSS_PCT}% del capital hoy. No se abren más operaciones hasta mañana (UTC).")
+                            continue
                         if trader.has_position(sym):
                             continue
                         if len(trader.state) >= C.MAX_POSITIONS:
