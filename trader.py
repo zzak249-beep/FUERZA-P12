@@ -10,6 +10,7 @@ import ccxt
 import pandas as pd
 
 import config as C
+from store import load_state
 
 log = logging.getLogger("trader")
 
@@ -29,11 +30,7 @@ class Trader:
 
     # ---------- estado ----------
     def _load(self):
-        try:
-            with open(C.STATE_PATH) as f:
-                return json.load(f)
-        except Exception:
-            return {}
+        return load_state(C.STATE_PATH)
 
     def _save(self):
         try:

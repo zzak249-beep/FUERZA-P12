@@ -24,10 +24,14 @@ MAX_SPREAD_PCT = _f("MAX_SPREAD_PCT", 0.06)    # spread máximo (% del precio)
 EXCLUDE = [x.strip().upper() for x in _s("EXCLUDE", "").split(",") if x.strip()]
 STOCK_RTH_ONLY = _b("STOCK_RTH_ONLY", True)    # acciones: solo sesión regular NYSE (9:30-16:00 ET)
 UNIVERSE_REFRESH = _i("UNIVERSE_REFRESH", 3600)
+for _x in SYMBOLS:                      # SYMBOLS=TOP:30 -> los 30 más líquidos
+    if _x.upper().startswith("TOP:"):
+        SCAN_ALL = True
+        MAX_SYMBOLS = int(_x.split(":")[1])
 BOOK = _i("BOOK", 1)
 MAX_POSITIONS = _i("MAX_POSITIONS", 3)
-STATE_PATH = _s("STATE_PATH", "state.json")
-DATA_DIR = os.path.dirname(STATE_PATH) or "."
+DATA_DIR = _s("DATA_DIR", "") or os.path.dirname(_s("STATE_PATH", "")) or "."
+STATE_PATH = os.path.join(DATA_DIR, "granville_state.json")   # nombre propio: no pisa archivos de otros bots
 
 # ---- timeframe (15m o 1h). Los TF superiores se derivan solos.
 _DUR = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}

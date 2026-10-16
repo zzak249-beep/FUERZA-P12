@@ -67,7 +67,7 @@ git push -u origin main
 ## 4. Railway
 1. New Project → Deploy from GitHub repo.
 2. Variables: copia todas las de `.env.example` con tus valores.
-3. Volumes → añade un volumen montado en `/data` (guarda `state.json` entre reinicios) y deja `STATE_PATH=/data/state.json`.
+3. Volumes → añade un volumen montado en `/data` (guarda `state.json` entre reinicios) y deja `DATA_DIR=/data` (el bot usa archivos `granville_*.json`, no pisa los de otros bots).
 4. Deploy. Verás "Granville Bot iniciado" en Telegram.
 5. Mantén **una sola réplica** (si no, abrirá operaciones duplicadas).
 

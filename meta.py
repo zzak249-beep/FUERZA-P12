@@ -138,8 +138,8 @@ class Brain:
     """Carga modelo + muestras, decide si una señal pasa y aprende de cada operación cerrada."""
 
     def __init__(self):
-        self.model_path = os.path.join(C.DATA_DIR, "meta_model.json")
-        self.samples_path = os.path.join(C.DATA_DIR, "samples.jsonl")
+        self.model_path = os.path.join(C.DATA_DIR, "granville_meta_model.json")
+        self.samples_path = os.path.join(C.DATA_DIR, "granville_samples.jsonl")
         self.gate = MetaGate()
         self.samples = []
         self.stats = {}
