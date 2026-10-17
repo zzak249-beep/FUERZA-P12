@@ -3,7 +3,7 @@ Lo usan igual el bot en vivo (última vela) y el backtester (todas las velas).""
 import numpy as np
 import pandas as pd
 import config as C
-from indicators import sma, ema, atr, rsi, macd_hist, vwap_daily, hap_score
+from indicators import sma, ema, atr, rsi, macd_hist, vwap_daily, hap_score, efficiency_ratio, adx
 
 
 def ma_f(s, n):
@@ -60,6 +60,8 @@ def build(df, htf, funding=None):
         "atr_ratio": (atrp / atrp.rolling(200, min_periods=50).median()).values,
         "sc15": _hap_series(c).values,
         "hour": df.index.hour.values, "wday": df.index.dayofweek.values,
+        "er": efficiency_ratio(c, C.ER_LEN).values, "adx": adx(df, 14).values,
+        "body_ratio": (body / rng).fillna(0.0).values,
     }
     ct = df.index + pd.Timedelta(seconds=C.TF_SEC)
 

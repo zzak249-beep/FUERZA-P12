@@ -144,3 +144,24 @@ TRAIL_ATR = _f("TRAIL_ATR", 2.0)
 VOL_SCALE_ON = _b("VOL_SCALE_ON", False)
 VOL_SCALE_LO = 0.5
 VOL_SCALE_HI = 1.25
+
+# ---- avisos tipo "escáner" (formato Telegram, seguimiento virtual, comandos)
+ACCOUNT_USDT = _f("ACCOUNT_USDT", 1000)          # solo para el tamaño sugerido en modo señales
+MAX_OPEN_PAPER = _i("MAX_OPEN_TRADES", 8)        # tope de operaciones virtuales abiertas (DRY_RUN)
+MAX_SIGNALS_PER_SCAN = _i("MAX_SIGNALS_PER_SCAN", 15)
+COMMANDS_ON = _b("TELEGRAM_COMMANDS", True)
+SUMMARY_HOUR = _i("SUMMARY_HOUR_UTC", 8)         # -1 = sin resumen diario
+
+# ---- filtros extra tomados de tu escáner (apagados por defecto: mide con backtest antes)
+USE_ER = _b("USE_ER", False)                     # régimen: eficiencia de Kaufman en códigos de tendencia
+ER_LEN = 20
+ER_MIN = _f("ER_MIN", 0.25)
+USE_BODY = _b("USE_BODY", False)                 # cuerpo/rango mínimo en códigos de tendencia
+BODY_MIN = _f("BODY_MIN", 0.55)
+USE_CLIMAX = _b("USE_CLIMAX", False)             # extremos (g4/g8) solo con RVOL de clímax
+CLIMAX_MULT = _f("CLIMAX_MULT", 1.8)
+COST_MULT = _f("COST_MULT", 0.0)                 # stop% >= x * coste%  (tu escáner usa 5; 0 = apagado)
+
+# ---- límites de concentración y tipo de orden del TP
+MAX_SAME_DIR = _i("MAX_SAME_DIR", 2)             # máx. posiciones abiertas en la misma dirección (long o short)
+TP_ORDER = _s("TP_ORDER", "trigger").lower()     # trigger = disparador (visible en TP/SL, comisión taker) | limit = límite (comisión maker, posible no-ejecución)

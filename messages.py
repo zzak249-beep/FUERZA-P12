@@ -80,10 +80,10 @@ def event_message(tr, ev, R=None, exit_px=None):
     """tr: dict con side, symbol, tf, kinds, entry, tp2, prec, bars."""
     head = f"<b>{tr['side']}</b> · <b>{html.escape(tr['symbol'])}</b> · {tr['tf']} · {'+'.join(tr['kinds'])}"
     if ev == "TP1":
-        rest = f"trailing {C.TRAIL_ATR:g}×ATR" if C.TRAIL_ON else f"hacia TP2 <code>{fmt_price(tr['tp2'], tr['prec'])}</code>"
+        rest = f"con trailing {C.TRAIL_ATR:g}×ATR" if C.TRAIL_ON else f"hacia TP2 <code>{fmt_price(tr['tp2'], tr['prec'])}</code>"
         return (f"🎯 TP1 alcanzado · {head}\n"
                 f"Cierra {C.TP1_FRAC * 100:g}% y mueve el SL a la entrada <code>{fmt_price(tr['entry'], tr['prec'])}</code>.\n"
-                f"El resto sigue con {rest}.")
+                f"El resto sigue {rest}.")
     icon, label = EVENT_TEXT.get(ev, ("ℹ️", ev))
     R = tr.get("R", 0.0) if R is None else R
     px = tr.get("exit_px", tr["entry"]) if exit_px is None else exit_px

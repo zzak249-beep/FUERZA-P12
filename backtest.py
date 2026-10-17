@@ -230,6 +230,7 @@ def main():
     ap.add_argument("--tf", default=C.TF)
     ap.add_argument("--book", type=int, default=C.BOOK)
     ap.add_argument("--compare", action="store_true")
+    ap.add_argument("--compare-exits", action="store_true")
     ap.add_argument("--train-meta", action="store_true")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--max-symbols", type=int, default=30)
@@ -248,6 +249,16 @@ def main():
         print(f"Universo: {len(syms)} símbolos (los {a.max_symbols} más líquidos)")
     if a.selftest:
         syms = ["SYNTH"]
+
+    if a.compare_exits:
+        print(f"Comparación de salidas · TF {a.tf} · libro {a.book} · coste {C.COST_PCT}%\n")
+        base = run_case(syms, a.tf, a.book, a.days, a.funding, a.selftest)  # solo para precargar datos
+        for name, trail, atr_m, partial in (("TP2 fijo (actual)", False, 2.0, True), ("Trailing 1.5 ATR", True, 1.5, True),
+                                            ("Trailing 2 ATR", True, 2.0, True), ("Trailing 3 ATR", True, 3.0, True),
+                                            ("Salida simple 1.5R", False, 2.0, False)):
+            C.TRAIL_ON, C.TRAIL_ATR, C.PARTIAL_MODE = trail, atr_m, partial
+            print(row(name, metrics(run_case(syms, a.tf, a.book, a.days, a.funding, a.selftest))))
+        return
 
     if a.compare:
         print(f"Comparación (sin meta, coste {C.COST_PCT}%, {a.days} días)\n")

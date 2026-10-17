@@ -3,6 +3,7 @@ Entrada a mercado + SL en el exchange + TP1 (50%) + TP2 (50%) o trailing ATR tra
 Cada operación cerrada se registra (R neto) y alimenta el meta-modelo y la estacionalidad."""
 import json
 import logging
+import math
 import os
 import time
 
@@ -10,6 +11,7 @@ import ccxt
 import pandas as pd
 
 import config as C
+import messages
 from store import load_state
 
 log = logging.getLogger("trader")
@@ -29,6 +31,7 @@ class Trader:
         self.ex.load_markets()
         self.state = self._load()
         self.day, self.day_pnl = None, 0.0
+        self.ledger = None
 
     # ---------- estado ----------
     def _load(self):
@@ -66,6 +69,19 @@ class Trader:
         eq = self._equity()
         self.notify(f"✅ Cuenta BingX conectada · equity {eq:.2f} USDT · modo posición: {C.POSITION_MODE}")
         return eq
+
+    def prec(self, sym):
+        try:
+            p = float(self.ex.market(sym).get("precision", {}).get("price"))
+        except Exception:
+            return 6
+        return int(round(-math.log10(p))) if 0 < p < 1 else int(p)
+
+    def _view(self, sym, st):
+        pl = st.get("plan") or {}
+        return {"side": st["side"].upper(), "symbol": st.get("sym_id") or sym, "tf": C.TF, "kinds": [st["code"]],
+                "entry": st["entry"], "tp2": pl.get("tp2") or st.get("tp_final") or st["entry"],
+                "prec": st.get("prec", 6), "bars": int((time.time() - st["opened"]) / C.TF_SEC)}
 
     # ---------- datos ----------
     def fetch_closed(self, symbol, tf, limit):
@@ -141,16 +157,15 @@ class Trader:
         """Take profit nativo (disparador TAKE_PROFIT_MARKET, igual que el SL). Respaldo: orden límite."""
         side_c = "sell" if side == "long" else "buy"
         errs = []
-        for typ, params in (("market", {"takeProfitPrice": price}),
-                            ("TAKE_PROFIT_MARKET", {"stopPrice": price})):
+
+        def trig1(): return self.ex.create_order(sym, "market", side_c, qty, None, self._p(side, True, {"takeProfitPrice": price}))
+        def trig2(): return self.ex.create_order(sym, "TAKE_PROFIT_MARKET", side_c, qty, None, self._p(side, True, {"stopPrice": price}))
+        def lim(): return self.ex.create_order(sym, "limit", side_c, qty, price, self._p(side, True))
+        for fn in ((lim, trig1, trig2) if C.TP_ORDER == "limit" else (trig1, trig2, lim)):
             try:
-                return self.ex.create_order(sym, typ, side_c, qty, None, self._p(side, True, params))["id"]
+                return fn()["id"]
             except Exception as e:
                 errs.append(str(e)[:140])
-        try:
-            return self.ex.create_order(sym, "limit", side_c, qty, price, self._p(side, True))["id"]
-        except Exception as e:
-            errs.append(str(e)[:140])
         raise Exception(" | ".join(errs))
 
     def _is_open(self, sym, oid):
@@ -223,7 +238,7 @@ class Trader:
             self.ex.create_order(sym, "market", side_c, q, None, self._p(side, True))
 
     # ---------- aprendizaje ----------
-    def _record(self, st, exit_price, final_target=False):
+    def _record(self, st, exit_price, reason=""):
         """R neto de la operación -> freno diario + cerebro (meta + estacionalidad)."""
         s = 1 if st["side"] == "long" else -1
         risk = st["risk"]
@@ -233,6 +248,12 @@ class Trader:
         Rn = R - C.COST_PCT / (risk / st["entry"] * 100)
         self._roll()
         self.day_pnl += Rn * C.RISK_PCT
+        if self.ledger is not None:
+            self.ledger.add_closed({"mode": "real", "symbol": st.get("sym_id", ""), "side": st["side"].upper(),
+                                    "tf": C.TF, "kinds": [st["code"]], "R": Rn, "reason": reason,
+                                    "exit_ms": int(time.time() * 1000),
+                                    "bars": int((time.time() - st["opened"]) / C.TF_SEC)})
+            self.ledger.save()
         if self.brain and st.get("x"):
             self.brain.record({"x": st["x"], "y": int(Rn > 0), "r": Rn, "hour": st["hour"],
                                "wday": st["wday"], "ts": time.time()})
@@ -286,7 +307,7 @@ class Trader:
 
         st = {"side": side, "code": sig["code"], "entry": fill, "risk": risk, "qty": qty, "atr": sig["atr"],
               "sl": sl, "sl_id": sl_id, "opened": time.time(), "tp1_id": None, "tp2_id": None,
-              "tp1_done": False, "tp1_hit": False, "trail": False, "tp_final": None, "tp_ok": False, "plan": None,
+              "tp1_done": False, "tp1_hit": False, "trail": False, "tp_final": None, "tp_ok": False, "plan": None, "sym_id": m["id"], "prec": self.prec(sym),
               "x": sig["x"], "hour": sig["hour"], "wday": sig["wday"]}
         st["plan"] = self._plan(sym, st)
         ok, tp_txt, errs = self._place_tps(sym, st)
@@ -296,8 +317,8 @@ class Trader:
         self.state[sym] = st
         self._save()
         self.notify(
-            f"{'🟢' if side == 'long' else '🔴'} <b>{side.upper()} {sym}</b> [{sig['code']}]\n"
-            f"Entrada {fill} · cantidad {qty}\nSL {sl}\n{tp_txt}\n"
+            f"✅ <b>Orden ejecutada en BingX</b> · {m['id']} · {side.upper()} [{sig['code']}]\n"
+            f"Entrada {fill} · cantidad {qty} · SL {sl}\n{tp_txt}\n"
             f"Riesgo {C.RISK_PCT * mult:.2f}% del capital (≈{equity * C.RISK_PCT * mult / 100:.2f} USDT)")
 
     # ---------- trailing (se llama al cerrar cada vela) ----------
@@ -339,16 +360,18 @@ class Trader:
             sl_hit = self._closed(sym, st["sl_id"])
             for k in ("sl_id", "tp1_id", "tp2_id"):
                 self._cancel(sym, st.get(k))
-            rn = None
+            ev, px, rn = None, None, None
             if tp_hit and st.get("tp_final"):
-                rn = self._record(st, st["tp_final"])
-                msg = "🎯 Objetivo final alcanzado"
+                ev, px = "TP2", st["tp_final"]
             elif sl_hit:
-                rn = self._record(st, st["sl"])
-                msg = "🛑 Stop alcanzado" + (" (BE/trailing)" if st.get("tp1_hit") else "")
+                px = st["sl"]
+                ev = "SL" if not st.get("tp1_hit") else ("BE" if abs(st["sl"] - st["entry"]) < 1e-12 else "TRAIL")
+            view = self._view(sym, st)
+            if ev:
+                rn = self._record(st, px, ev)
+                self.notify(messages.event_message(view, ev, rn, px))
             else:
-                msg = "ℹ️ Posición cerrada"
-            self.notify(f"{msg} · {sym} [{st['code']}]" + (f" · {rn:+.2f}R neto" if rn is not None else ""))
+                self.notify(f"ℹ️ Posición cerrada · {view['symbol']} [{st['code']}]")
             self.state.pop(sym, None)
             self._save()
             return
@@ -360,7 +383,7 @@ class Trader:
             try:
                 st["sl_id"] = self._stop(sym, side, qty_now, self._px(sym, st["entry"]))
                 st["sl"] = st["entry"]
-                self.notify(f"✅ TP1 en {sym}. Stop movido a entrada ({st['entry']}).")
+                self.notify(messages.event_message(self._view(sym, st), "TP1"))
             except Exception as e:
                 self.notify(f"🚨 {sym}: TP1 hecho pero fallo al mover SL a BE ({e}). Revisa a mano.")
             self._save()
@@ -387,9 +410,8 @@ class Trader:
             try:
                 px = float(self.ex.fetch_ticker(sym)["last"])
                 self._flatten(sym, side)
-                rn = self._record(st, px)
-                self.notify(f"⏱ Cierre por tiempo ({C.MAX_BARS} velas) · {sym} [{st['code']}]"
-                            + (f" · {rn:+.2f}R neto" if rn is not None else ""))
+                rn = self._record(st, px, "TIME")
+                self.notify(messages.event_message(self._view(sym, st), "TIME", rn, px))
                 self.state.pop(sym, None)
                 self._save()
             except Exception as e:

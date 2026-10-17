@@ -1,17 +1,29 @@
 import logging
+import os
+import threading
 import time
+from collections import Counter
+from datetime import datetime, timezone
+
+import pandas as pd
 
 import config as C
 import features
+import ledger as ledger_mod
+import messages
+import stats
 import strategy
 import universe
+from commands import command_loop
 from meta import Brain
 from notifier import notify
+from store import Seen
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("main")
 
 BOOKS = {0: "Base", 1: "V2 (filtros)", 2: "V3 (+momentum)", 3: "V4 (+HaP)"}
+STATUS = {"started": time.time(), "last_scan": None, "symbols": 0}
 
 
 def fetch_all(trader, sym):
@@ -20,7 +32,16 @@ def fetch_all(trader, sym):
     return df, htf
 
 
-def scan_symbol(trader, brain, sym, cls, bar_id, now, last_bar):
+def paper_events(brain, ledger, sym, df):
+    """Avanza las operaciones virtuales y avisa de cada hito (TP1, SL, TP2...)."""
+    for ev, tr in ledger.update(sym, df):
+        notify(messages.event_message(tr, ev, tr.get("R"), tr.get("exit_px")))
+        if tr["closed"] and tr.get("x") and tr.get("R") is not None and ev != "EXPIRED":
+            brain.record({"x": tr["x"], "y": int(tr["R"] > 0), "r": tr["R"], "hour": tr["hour"],
+                          "wday": tr["wday"], "ts": time.time()})
+
+
+def scan_symbol(trader, brain, ledger, sym, cls, bar_id, now, last_bar):
     """Devuelve (score, sym, sig, info, mult) si hay señal válida; None si no."""
     df = trader.fetch_closed(sym, C.TF, 120)
     expected = (bar_id - 1) * C.TF_SEC * 1000
@@ -29,10 +50,14 @@ def scan_symbol(trader, brain, sym, cls, bar_id, now, last_bar):
             last_bar[sym] = bar_id   # mercado cerrado / sin datos nuevos
         return None
     last_bar[sym] = bar_id
+    if ledger.has_open(sym):
+        paper_events(brain, ledger, sym, df)
     if sym in trader.state:
         trader.trail_update(sym, float(df.close.iloc[-1]))
         return None
-    close_ts = df.index[-1] + __import__("pandas").Timedelta(seconds=C.TF_SEC)
+    if C.DRY_RUN and ledger.has_open(sym):
+        return None
+    close_ts = df.index[-1] + pd.Timedelta(seconds=C.TF_SEC)
     if not universe.market_open(cls, close_ts):
         return None
     if not strategy.has_candidate(features.build_light(df)):
@@ -47,27 +72,58 @@ def scan_symbol(trader, brain, sym, cls, bar_id, now, last_bar):
     if not ok:
         log.info("Señal bloqueada %s %s: %s", sym, sig["code"], info)
         return None
-    score = p if p is not None else float(F["rvol"][-1])
-    return (score, sym, sig, info, mult)
+    return (p if p is not None else float(F["rvol"][-1]), sym, sig, info, mult)
 
 
 def main():
     from trader import Trader
     brain = Brain()
     trader = Trader(notify, brain)
-    last_bar, cooldown, cls_of = {}, {}, {}
-    syms, last_uni = [], 0
+    ledger = ledger_mod.Ledger(os.path.join(C.DATA_DIR, "granville_ledger.json"))
+    trader.ledger = ledger
+    seen = Seen(os.path.join(C.DATA_DIR, "granville_seen.json"))
+    last_bar, cls_of, syms, last_uni, halt_day, last_summary = {}, {}, [], 0, None, None
     g = brain.gate
-    notify(
-        "🤖 <b>Granville Bot iniciado</b>\n"
-        f"Modo: {'SOLO SEÑALES (DRY_RUN)' if C.DRY_RUN else ('DEMO' if C.DEMO else 'DINERO REAL')}\n"
-        f"TF {C.TF} · Libro: {BOOKS.get(C.BOOK)} · Universo: {'TODO BingX (' + ','.join(C.CLASSES) + ')' if C.SCAN_ALL else ', '.join(C.SYMBOLS)}\n"
-        f"Riesgo {C.RISK_PCT}% · Apal. máx {C.MAX_LEV}x · Máx. posiciones {C.MAX_POSITIONS}\n"
-        f"Meta: {'ON' if C.META_ON else 'OFF'} (modelo {'n=' + str(g.n) if g.beta is not None else 'NO cargado'}) · "
-        f"Estac.: {'ON' if C.SEASON_ON else 'OFF'} · Trailing: {'ON' if C.TRAIL_ON else 'OFF'} · "
-        f"Funding: {'ON' if C.FUNDING_ON else 'OFF'} · Muestras: {len(brain.samples)}")
 
-    halt_day = None
+    def open_list():
+        out = [{"side": t["side"], "symbol": t["symbol"], "tf": t["tf"], "kinds": t["kinds"], "entry": t["entry"],
+                "sl": t["sl"], "stage": t["stage"], "bars": t["bars"], "prec": t["prec"], "mode": "virtual"}
+               for t in ledger.open]
+        out += [{"side": st["side"].upper(), "symbol": st.get("sym_id", s), "tf": C.TF, "kinds": [st["code"]],
+                 "entry": st["entry"], "sl": st["sl"], "stage": 2 if st.get("tp1_hit") else 1,
+                 "bars": int((time.time() - st["opened"]) / C.TF_SEC), "prec": st.get("prec", 6), "mode": "real"}
+                for s, st in trader.state.items()]
+        return out
+
+    def stats_msg(days=None, title="📊 Estadísticas"):
+        return stats.stats_message(ledger, len(open_list()), days, title)
+
+    def status_msg():
+        ls = "aún sin escanear" if not STATUS["last_scan"] else f"hace {int((time.time() - STATUS['last_scan']) / 60)} min"
+        return (f"✅ Activo hace {(time.time() - STATUS['started']) / 3600:.1f} h · {STATUS['symbols']} símbolos · "
+                f"último escaneo {ls} · {'SOLO SEÑALES' if C.DRY_RUN else 'REAL'}")
+
+    notify(
+        f"✅ <b>Granville Bot iniciado</b> · TF {C.TF} · libro {BOOKS.get(C.BOOK)}\n"
+        f"Modo: {'SOLO SEÑALES (seguimiento virtual)' if C.DRY_RUN else ('DEMO' if C.DEMO else 'DINERO REAL')}\n"
+        f"Universo: {'todo BingX (' + ','.join(C.CLASSES) + ')' if C.SCAN_ALL else ', '.join(C.SYMBOLS)} · "
+        f"riesgo {C.RISK_PCT}% · máx. posiciones {C.MAX_POSITIONS if not C.DRY_RUN else C.MAX_OPEN_PAPER}\n"
+        f"Meta: {'ON' if C.META_ON else 'OFF'} ({'modelo n=' + str(g.n) if g.beta is not None else 'sin modelo'}) · "
+        f"Estac.: {'ON' if C.SEASON_ON else 'OFF'} · Trailing: {'ON' if C.TRAIL_ON else 'OFF'} · "
+        f"Muestras: {len(brain.samples)} · abiertas: {len(open_list())}\n"
+        f"Comandos: /stats /semana /abiertas /estado")
+
+    stop = threading.Event()
+    if C.COMMANDS_ON and C.TG_TOKEN and C.TG_CHAT:
+        handlers = {"/stats": lambda: notify(stats_msg()), "/estadisticas": lambda: notify(stats_msg()),
+                    "/semana": lambda: notify(stats_msg(7)), "/week": lambda: notify(stats_msg(7)),
+                    "/abiertas": lambda: notify(messages.open_message(open_list())),
+                    "/open": lambda: notify(messages.open_message(open_list())),
+                    "/estado": lambda: notify(status_msg()), "/status": lambda: notify(status_msg()),
+                    "/ayuda": lambda: notify("Comandos: /stats (todo) · /semana (7 días) · /abiertas · /estado"),
+                    "/start": lambda: notify("Comandos: /stats (todo) · /semana (7 días) · /abiertas · /estado")}
+        threading.Thread(target=command_loop, args=(C.TG_TOKEN, C.TG_CHAT, handlers, stop), daemon=True).start()
+
     if not C.DRY_RUN:
         try:
             trader.check_account()
@@ -81,10 +137,7 @@ def main():
             if C.SCAN_ALL and now - last_uni > C.UNIVERSE_REFRESH:
                 try:
                     u = universe.build(trader.ex)
-                    syms = [s for s, _, _ in u]
-                    cls_of = {s: c for s, c, _ in u}
-                    last_uni = now
-                    from collections import Counter
+                    syms, cls_of, last_uni = [s for s, _, _ in u], {s: c for s, c, _ in u}, now
                     notify(f"🔎 Universo: {len(u)} símbolos {dict(Counter(cls_of.values()))}")
                 except Exception as e:
                     notify(f"⚠️ No pude construir el universo: {e}")
@@ -92,7 +145,8 @@ def main():
             elif not C.SCAN_ALL and not syms:
                 syms = C.SYMBOLS
                 cls_of = {s: universe.classify(trader.ex.market(s)) for s in syms}
-            scan = list(dict.fromkeys(syms + list(trader.state.keys())))
+            STATUS["symbols"] = len(syms)
+            scan = list(dict.fromkeys(syms + list(trader.state.keys()) + ledger.open_symbols()))
 
             bar_id = int(now // C.TF_SEC)
             for sym in list(trader.state.keys()):
@@ -104,39 +158,70 @@ def main():
                     if last_bar.get(sym) == bar_id:
                         continue
                     try:
-                        r = scan_symbol(trader, brain, sym, cls_of.get(sym, "crypto"), bar_id, now, last_bar)
+                        r = scan_symbol(trader, brain, ledger, sym, cls_of.get(sym, "crypto"), bar_id, now, last_bar)
                         if r:
                             found.append(r)
                     except Exception as e:
                         log.warning("Error en %s: %s", sym, e)
+                for tr_msg in ledger.expire_stale(int(now * 1000)):
+                    notify(messages.event_message(tr_msg[1], "EXPIRED"))
+                if found or any(last_bar.get(s) == bar_id for s in scan):
+                    STATUS["last_scan"] = time.time()
+
                 found.sort(key=lambda r: -r[0])
-                for score, sym, sig, info, mult in found:
-                    head = (f"{'🟢' if sig['side'] == 'long' else '🔴'} <b>SEÑAL {sig['side'].upper()} {sym}</b> "
-                            f"[{sig['code']}] · {cls_of.get(sym, '')} · {BOOKS[C.BOOK]}")
+                new = []
+                for item in found:
+                    key = f"{item[1]}|{C.TF}|{item[2]['bar_ts']}|{item[2]['side']}"
+                    if not seen.seen(key):
+                        new.append((key, item))
+                limit = C.MAX_SIGNALS_PER_SCAN
+                skipped = []
+                for key, (score, sym, sig, info, mult) in new:
+                    seen.add(key)
+                    name = f"{sym.split('/')[0]} {sig['side']} {sig['code']}"
+                    if limit <= 0:
+                        skipped.append(name)
+                        continue
+                    sid, prec = trader.ex.market(sym)["id"], trader.prec(sym)
                     if C.DRY_RUN:
-                        if cooldown.get(sym, 0) > now:
+                        if ledger.open_count() >= C.MAX_OPEN_PAPER or \
+                                sum(1 for t_ in ledger.open if t_["side"] == sig["side"].upper()) >= C.MAX_SAME_DIR:
+                            skipped.append(name)
                             continue
-                        cooldown[sym] = now + C.MAX_BARS * C.TF_SEC
-                        notify(f"{head}\nEntrada ~{sig['entry']:.6g}\nSL {sig['sl']:.6g}\n"
-                               f"TP1 {sig['tp1']:.6g} · TP2 {sig['tp2']:.6g}\n"
-                               f"Riesgo {sig['risk'] / sig['entry'] * 100:.2f}% del precio\n{info}")
+                        notify(messages.signal_message(sig, sid, prec, C.ACCOUNT_USDT, False, int(time.time() * 1000), info))
+                        ledger.add(ledger_mod.make_paper(sig, sym, sid, prec))
+                        limit -= 1
                     else:
                         if not trader.can_open():
                             if halt_day != trader.day:
                                 halt_day = trader.day
-                                notify(f"⛔ Freno diario: pérdida ≥ {C.DAILY_LOSS_PCT}% del capital hoy. No se abren más operaciones hasta mañana (UTC).")
+                                notify(f"⛔ Freno diario: pérdida ≥ {C.DAILY_LOSS_PCT}% del capital hoy. "
+                                       f"No se abren más operaciones hasta mañana (UTC).")
                             continue
-                        if trader.has_position(sym):
+                        same_dir = sum(1 for st in trader.state.values() if st["side"] == sig["side"])
+                        if same_dir >= C.MAX_SAME_DIR:
+                            skipped.append(f"{name} (ya hay {same_dir} {sig['side']})")
                             continue
-                        if len(trader.state) >= C.MAX_POSITIONS:
-                            notify(f"ℹ️ {len(found)} señal(es) este cierre; máx. posiciones ({C.MAX_POSITIONS}) alcanzado, "
-                                   f"se descarta {sym} (puntuación {score:.2f})")
+                        if trader.has_position(sym) or len(trader.state) >= C.MAX_POSITIONS or not trader.spread_ok(sym):
+                            skipped.append(name)
                             continue
-                        if not trader.spread_ok(sym):
-                            notify(f"ℹ️ {sym} descartado: spread > {C.MAX_SPREAD_PCT}%")
-                            continue
-                        notify(f"{head}\n{info}")
+                        try:
+                            acct = trader._equity()
+                        except Exception:
+                            acct = C.ACCOUNT_USDT
+                        notify(messages.signal_message(sig, sid, prec, acct, True, int(time.time() * 1000), info))
                         trader.open_trade(sym, sig, mult)
+                        limit -= 1
+                if skipped:
+                    notify(f"➕ {len(skipped)} señales más omitidas por el límite de señales/posiciones abiertas: "
+                           + ", ".join(skipped[:15]))
+                seen.save()
+                ledger.save()
+
+            utc = datetime.now(timezone.utc)
+            if 0 <= C.SUMMARY_HOUR <= 23 and utc.hour == C.SUMMARY_HOUR and last_summary != utc.date():
+                last_summary = utc.date()
+                notify(stats_msg(1, "🗓 Resumen diario") + "\n\n" + stats_msg(None, "Acumulado"))
         except Exception as e:
             log.exception("Error en bucle")
             notify(f"⚠️ Error en bucle principal: {e}")

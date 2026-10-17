@@ -67,6 +67,7 @@ def signal_at(F, i, book):
                 continue
             risk = max(risk, C.MIN_RISK_ATR * A)
 
+        notes = []
         if book >= 1:
             if not _session_ok(int(F["hour"][i])):
                 continue
@@ -79,6 +80,8 @@ def signal_at(F, i, book):
                 continue
             if not trend and not (aligned or flat):
                 continue
+            if aligned:
+                notes.append(f"HTF {C.HTF_TF}: {'alcista' if s == 1 else 'bajista'} ✓")
             rv = F["rvol"][i]
             if np.isnan(rv) or rv < C.RVOL_MIN:
                 continue
@@ -86,6 +89,14 @@ def signal_at(F, i, book):
                 vw = F["vwap"][i]
                 if (s == 1 and price >= vw) or (s == -1 and price <= vw):
                     continue
+            if trend and C.USE_ER and F["er"][i] < C.ER_MIN:
+                continue
+            if trend and C.USE_BODY and F["body_ratio"][i] < C.BODY_MIN:
+                continue
+            if not trend and C.USE_CLIMAX and rv < C.CLIMAX_MULT:
+                continue
+            if C.COST_MULT > 0 and (risk / price * 100) < C.COST_MULT * C.COST_PCT:
+                continue
             if C.FUNDING_ON:
                 f = F["funding"][i]
                 if not np.isnan(f) and s * f > C.FUNDING_EXTREME:
@@ -150,6 +161,10 @@ def signal_at(F, i, book):
             "tp1": price + s * C.TP1_R * risk, "tp2": price + s * C.TP2_R * risk,
             "tp_single": price + s * C.TP_SINGLE_R * risk,
             "hour": int(F["hour"][i]), "wday": int(F["wday"][i]), "risk_mult": mult,
+            "kinds": [code], "notes": notes,
+            "stats": {"er": float(F["er"][i]), "adx": float(F["adx"][i]),
+                      "rvol": None if np.isnan(F["rvol"][i]) else float(F["rvol"][i]),
+                      "body": float(F["body_ratio"][i])},
             "x": meta.make_x(F, i, s, code, risk, price, A),
             "bar_ts": int(F["idx"][i].timestamp() * 1000),
         }

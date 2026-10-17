@@ -48,3 +48,21 @@ def hap_score(src, first, step, smooth, w_slope, w_period, w_align):
     tot = w_slope + w_period + w_align
     raw = 100.0 * (w_slope * rise + w_period * wper + w_align * align) / tot
     return raw.ewm(span=smooth, adjust=False).mean()
+
+
+def efficiency_ratio(c, n):
+    den = c.diff().abs().rolling(n).sum()
+    return ((c - c.shift(n)).abs() / den.replace(0, np.nan)).fillna(0.0)
+
+
+def adx(df, n):
+    h, l, c = df.high, df.low, df.close
+    pc = c.shift(1)
+    tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    up, dn = h.diff(), -l.diff()
+    pdm = pd.Series(np.where((up > dn) & (up > 0), up, 0.0), index=df.index)
+    mdm = pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0), index=df.index)
+    a = rma(tr, n)
+    pdi, mdi = 100 * rma(pdm, n) / a, 100 * rma(mdm, n) / a
+    dx = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, np.nan)
+    return rma(dx.fillna(0.0), n)

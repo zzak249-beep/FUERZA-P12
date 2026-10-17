@@ -25,6 +25,13 @@ python backtest.py --book 1 --train-meta           # crea meta_model.json + samp
 - Activa solo lo que mejore el resultado fuera de muestra en TODOS los trimestres, no solo en el total.
 - `python backtest.py --selftest` prueba que todo funciona con datos sintéticos (resultados sin significado).
 
+## Avisos de Telegram (mismo formato que tu escáner Granville)
+- Señal con tipo (G1…G8), precio ref., SL en ATR y %, TP1/TP2 en R, tamaño, ER/ADX/RVOL/cuerpo, HTF, gestión, hora de vela y enlace al gráfico.
+- Hitos: 🎯 TP1 · 🛑 SL · 🏆 TP2 · ⚪ BE · ✅ trailing · ⏱ tiempo, con el resultado en R neto.
+- En `DRY_RUN` cada señal se **sigue como operación virtual** (sin dinero) y alimenta el meta-modelo: así aprende y mides el winrate real antes de arriesgar nada.
+- Comandos: `/stats` `/semana` `/abiertas` `/estado` + resumen diario. Usa un bot de Telegram propio (si otro proceso lee los comandos del mismo token habrá conflicto 409).
+- No repite señales tras un redeploy (`granville_seen.json`).
+
 ## Universo: todas las monedas y acciones de BingX
 `SYMBOLS=ALL` escanea cada cierre de vela todos los perpetuos USDT que pasen `MIN_VOL_USDT` y `MAX_SPREAD_PCT` (máx. `MAX_SYMBOLS`), refrescando la lista cada hora.
 - Escaneo barato: baja 120 velas por símbolo y solo descarga el resto si hay candidato a señal.
