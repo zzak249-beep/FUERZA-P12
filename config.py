@@ -75,7 +75,7 @@ TP2_R = 2.0
 TP1_FRAC = 0.5
 MOVE_BE = True
 MAX_BARS = _i("MAX_BARS", 18)
-COST_PCT = _f("COST_PCT", 0.12)
+COST_PCT = _f("COST_PCT", 0.15)                  # coste ida y vuelta en % del precio (comisiones taker ≈0.10% + slippage)
 
 # ---- stop estructural
 STRUCT_BUF = 0.3
@@ -165,3 +165,93 @@ COST_MULT = _f("COST_MULT", 0.0)                 # stop% >= x * coste%  (tu esc�
 # ---- límites de concentración y tipo de orden del TP
 MAX_SAME_DIR = _i("MAX_SAME_DIR", 2)             # máx. posiciones abiertas en la misma dirección (long o short)
 TP_ORDER = _s("TP_ORDER", "trigger").lower()     # trigger = disparador (visible en TP/SL, comisión taker) | limit = límite (comisión maker, posible no-ejecución)
+
+# ---- ideas del otro análisis, implementadas con interruptor (todas APAGADAS salvo la sombra: mídelas con backtest)
+DUAL_ON = _b("DUAL_ON", False)                    # memoria por código en 2 horizontes (corto/largo)
+DUAL_HALF_SHORT, DUAL_HALF_LONG = 18.0, 90.0
+DUAL_PRIOR_SHORT, DUAL_PRIOR_LONG = 8.0, 30.0
+DUAL_MIN_N = _i("DUAL_MIN_N", 10)
+DUAL_GOOD = _f("DUAL_GOOD", 0.05)
+DUAL_Z = 0.5
+RANK_TOPK = _i("RANK_TOPK", 0)                    # 0 = off; k = solo los k mejores códigos por límite inferior
+RANK_HALF, RANK_PRIOR, RANK_Z, RANK_MIN_EDGE = 40.0, 12.0, 0.5, 0.0
+REGIME_EXITS = _b("REGIME_EXITS", False)          # TP2/barras/tamaño según régimen HaP (el stop NO cambia)
+RX_STRONG = 70.0
+RX_TP2_STRONG, RX_TP2_NEUTRAL, RX_TP2_MR = 2.8, 1.6, 1.5
+RX_BARS_STRONG, RX_BARS_NEUTRAL = 8, -6
+RX_RISK_NEUTRAL, RX_RISK_MR = 0.7, 0.6
+SHADOW_ON = _b("SHADOW_ON", True)                 # en real, sigue cada operación también como virtual (mide la brecha)
+SLIP_MAX_R = _f("SLIP_MAX_R", 0.15)               # slippage medio (R) que activa el recorte de tamaño al 50%
+KILL_MIN_N = _i("KILL_MIN_N", 15)                 # kill-switch: operaciones reales y virtuales mínimas
+KILL_GAP_R = _f("KILL_GAP_R", 0.5)                # pausa si virtual - real > x R/op
+MAX_SPREAD_R = _f("MAX_SPREAD_R", 0.15)           # spread máx. como fracción del riesgo (stop)
+
+# ================= ESTRATEGIA V9 (Crowding + Adaptativo) =================
+V9_FAITHFUL = _b("V9_FAITHFUL", False)   # true = replica los fallos del script (HaP/85, riskMult en el stop, régimen sin dirección)
+V9_STRENGTH = _f("V9_STRENGTH", 1.15)            # cuerpo de vela > x veces el cuerpo medio (el indicador base usa 1.2)
+V9_DEV = _f("V9_DEV", 2.35)                      # distancia a la media en ATR para los extremos G4/G8 (el indicador base usa 2.5)
+V9_TOUCH = _f("V9_TOUCH", 0.0015)                # tolerancia de toque de la media en rebotes G3/G7, en fracción del precio (el indicador base usa 0.002)
+V9_USE_REGIME = _b("V9_USE_REGIME", True)
+V9_HAP_STRONG, V9_NEUTRAL_LOW, V9_NEUTRAL_HIGH = 66.0, 38.0, 62.0
+V9_USE_SESSION = _b("V9_USE_SESSION", True)
+V9_AVOID_ASIA = _b("V9_AVOID_ASIA", True)        # evita 00:00-06:00 UTC
+V9_AVOID_LATE = _b("V9_AVOID_LATE", False)       # evita 21:00-23:59 UTC
+V9_RVOL_MIN = _f("V9_RVOL_MIN", 1.10)            # RVOL mínimo de la vela de señal
+V9_MAX_RANGE_ATR = _f("V9_MAX_RANGE_ATR", 2.6)   # rango máximo de la vela (en ATR)
+V9_MAX_COST_R = _f("V9_MAX_COST_R", 0.20)        # descarta señales cuyo coste (COST_PCT / stop%) supere x R; 0 = apagado
+V9_USE_CROWD = _b("V9_USE_CROWD", True)
+V9_CROWD_LOOK = _i("V9_CROWD_LOOK", 10)          # nº de señales recientes que mide el crowding
+V9_CROWD_MAX = _f("V9_CROWD_MAX", 0.48)          # crowding máximo permitido
+V9_USE_META = _b("V9_USE_META", True)
+V9_META_MIN = _f("V9_META_MIN", 0.50)
+V9_MEMORY_ON = _b("V9_MEMORY_ON", True)
+V9_MEM_HALF_S, V9_MEM_HALF_L = 14.0, 85.0
+V9_MEM_PRIOR_S, V9_MEM_PRIOR_L = 9.0, 28.0
+V9_MEM_MIN = _i("V9_MEM_MIN", 20)                # operaciones mínimas por código antes de que la memoria pueda bloquearlo (antes 7: demasiado ruidoso)
+V9_EDGE = _f("V9_EDGE", 0.03)                    # R medio mínimo exigido por la memoria
+LEARN_BLOCKED = _b("LEARN_BLOCKED", True)        # sigue como virtual (en silencio) las señales bloqueadas por las puertas: evita códigos "muertos"
+MAX_LEARN = _i("MAX_LEARN", 80)
+
+
+def set_strategy(name):
+    """granville = motor G1-G8 reconstruido · v9 = script Granville V9. Cada uno usa sus propios ficheros."""
+    global STRATEGY, PREFIX, TP1_FRAC, META_ON, SEASON_ON, STATE_PATH, ROOT_MODEL, ROOT_SAMPLES, BOT_NAME
+    STRATEGY = name
+    v9 = name == "v9"
+    PREFIX = "v9" if v9 else "granville"
+    TP1_FRAC = 0.45 if v9 else 0.5
+    META_ON = _b("META_ON", not v9)
+    SEASON_ON = _b("SEASON_ON", not v9)
+    STATE_PATH = os.path.join(DATA_DIR, f"{PREFIX}_state.json")
+    BOT_NAME = _s("BOT_NAME", "V9" if v9 else "G1-G8")
+    ROOT_MODEL = "meta_model_v9.json" if v9 else "meta_model.json"
+    ROOT_SAMPLES = "samples_v9.jsonl" if v9 else "samples.jsonl"
+
+
+set_strategy(_s("STRATEGY", "granville").lower())
+
+# ================= IDEAS NUEVAS (todas APAGADAS: mídelas con `backtest.py --compare-ideas`) =================
+FUND_PCT_ON = _b("FUND_PCT_ON", False)           # 1) no operar a favor del lado saturado según el percentil del funding (30 días)
+FUND_PCT_HI = _f("FUND_PCT_HI", 0.90)
+FUND_DAYS = 30
+OI_ON = _b("OI_ON", False)                       # 1) + Open Interest subiendo (SOLO EN VIVO: BingX no da histórico de OI)
+OI_RISE = _f("OI_RISE", 0.05)
+OI_WINDOW_H = 4
+DELTA_ON = _b("DELTA_ON", False)                 # 2) delta aproximado + absorción en contra
+DELTA_MIN = _f("DELTA_MIN", 0.0)
+ABS_RVOL, ABS_RANGE = 1.5, 0.7
+VT_ON = _b("VT_ON", False)                       # 3) volatility targeting relativo (vol corta / vol larga del propio activo)
+VT_SHORT, VT_LONG = 84, 240                      # en velas del TF mayor (4h: 14 y 40 días)
+VT_LO, VT_HI = 0.5, 1.25
+MTF_STRICT = _b("MTF_STRICT", False)             # 4) HaP del TF mayor a favor en códigos de tendencia
+MTF_HAP_MIN = _f("MTF_HAP_MIN", 50.0)
+SMART_TIME_ON = _b("SMART_TIME_ON", False)       # 5) salida anticipada si el HaP se gira en contra (SOLO BACKTEST hasta demostrarlo)
+V9_TRAIL_STRONG, V9_TRAIL_NORMAL = 3.0, 2.0      # 5) trailing más ancho en régimen fuerte (solo con TRAIL_ON)
+REGIME4_ON = _b("REGIME4_ON", False)             # 6) tendencia fuerte / débil / rango / caos
+R4_ADX_STRONG, R4_ADX_WEAK = 25.0, 18.0
+R4_CHAOS_ATR, R4_CHAOS_BBW = 2.0, 0.95
+R4_STRONG_HAP = 60.0
+R4_SIZE_WEAK, R4_RANGE_EXT_SIZE = 0.6, 0.8
+DECAY_ON = _b("DECAY_ON", False)                 # 7) kill-switch por degradación: si las últimas N operaciones rinden mal, tamaño x0.5
+DECAY_N, DECAY_R, DECAY_MULT = 12, 0.3, 0.5
+BOT_TAG = _b("BOT_TAG", True)                    # antepone [NOMBRE] a cada mensaje de Telegram (varios bots en el mismo chat)
